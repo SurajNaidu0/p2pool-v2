@@ -4,7 +4,7 @@ use ldk_node::bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
 use ldk_node::bitcoin::sighash::{Prevouts, SighashCache};
 use ldk_node::bitcoin::{
     Address, Amount, OutPoint, ScriptBuf, Sequence, TapLeafHash, TapSighashType, Transaction, TxIn,
-    TxOut, Witness,
+    TxOut, Witness, EcdsaSighashType,
 };
 use log::{error, info};
 use std::str::FromStr;
@@ -112,4 +112,46 @@ pub fn derive_keypair(private_key: &str) -> Result<Keypair, TxUtilsError> {
     let keypair = Keypair::from_secret_key(&Secp256k1::new(), &secret_key);
     info!("Derived keypair from private key");
     Ok(keypair)
+}
+
+/// Computes the P2WSH sighash for witness script spending.
+pub fn compute_sighash(
+    tx: &Transaction,
+    input_index: usize,
+    prevouts: &[TxOut],
+    witness_script: &ScriptBuf,
+) -> Result<[u8; 32], TxUtilsError> {
+    let mut sighash_cache = SighashCache::new(tx);
+    let sighash = sighash_cache
+        .p2wsh_signature_hash(
+            input_index,
+            witness_script,
+            prevouts[input_index].value,
+            EcdsaSighashType::All,
+        )
+        .map_err(|e| {
+            error!(
+                "Failed to compute P2WSH sighash for input {}: {}",
+                input_index, e
+            );
+            TxUtilsError::SighashComputationError(e.to_string())
+        })?;
+    info!("Computed P2WSH sighash for input {}", input_index);
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(sighash.to_raw_hash().as_ref());
+    Ok(bytes)
+}
+
+/// Signs an ECDSA sighash.
+pub fn sign_ecdsa(
+    secp: &Secp256k1<bitcoin::secp256k1::All>,
+    msg: &Message,
+    keypair: &Keypair,
+) -> bitcoin::ecdsa::Signature {
+    let signature = secp.sign_ecdsa(msg, &keypair.secret_key());
+    info!("Generated ECDSA signature for message");
+    bitcoin::ecdsa::Signature {
+        signature,
+        sighash_type: EcdsaSighashType::All,
+    }
 }

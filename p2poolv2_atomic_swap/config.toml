@@ -32,8 +32,8 @@ rgs_server_url = "https://mutinynet.ltbl.io/snapshot"
 db_path = "data/htlc_db"
 
 # private key
-private_key = "c929c768be0902d5bb7ae6e38bdc6b3b24cefbe93650da91975756a09e408460"
-
+private_key = "b813b096841b797ca631ce98fde4322dd53d6c8aad42e49a4e2df35ad269b96c"
+#private_key = "04aa30e9bf5c3a321f71ada33864866345bd9f42e8bc0697aa73a0e8432b3953"
 # RPC URL for HTLC configuration
 rpc_url = "https://mutinynet.com/api/"
 

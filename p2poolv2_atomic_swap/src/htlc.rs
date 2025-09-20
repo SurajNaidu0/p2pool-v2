@@ -15,11 +15,12 @@
 // P2Poolv2. If not, see <https://www.gnu.org/licenses/>.
 
 use crate::bitcoin::p2tr2;
-
+use crate::bitcoin::p2wsh2;
 use crate::bitcoin::utils::Utxo;
 use crate::swap::{HTLCType, Swap};
 use ldk_node::bitcoin::{Address, KnownHrp, Transaction};
 use std::error::Error;
+
 
 pub fn generate_htlc_address(swap: &Swap) -> Result<Address, Box<dyn Error>> {
     // need to removed
@@ -31,9 +32,8 @@ pub fn generate_htlc_address(swap: &Swap) -> Result<Address, Box<dyn Error>> {
             return Ok(address);
         }
         HTLCType::P2wsh2 => {
-            // Placeholder for P2WSH2 address generation (to be implemented in p2wsh2.rs)
-            Err("P2WSH2 address generation not yet implemented".into())
-            // Future implementation: p2wsh2::generate_p2wsh_address(swap, network)
+            let address = p2wsh2::generate_p2wsh_address(&swap.from_chain, &swap.payment_hash, network)?;
+            return Ok(address);
         }
     }
 }
@@ -62,9 +62,16 @@ pub fn redeem_htlc_address(
             .map_err(|e| Box::new(e) as Box<dyn Error>)
         }
         HTLCType::P2wsh2 => {
-            // Placeholder for P2WSH2 address generation (to be implemented in p2wsh2.rs)
-            Err("Need to implemet p2wsh2 atomic swap redeem function".into())
-            // Future implementation: p2wsh2::generate_p2wsh_address(swap, network)
+             p2wsh2::redeem_p2wsh_htlc(
+                &swap.from_chain,
+                &swap.payment_hash,
+                preimage,
+                receiver_private_key,
+                utxos,
+                transfer_to_address,
+                3,
+                network
+            ).map_err(|e| Box::new(e) as Box<dyn Error>)
         }
     }
 }
@@ -91,9 +98,55 @@ pub fn refund_htlc_address(
             .map_err(|e| Box::new(e) as Box<dyn Error>)
         }
         HTLCType::P2wsh2 => {
-            // Placeholder for P2WSH2 address generation (to be implemented in p2wsh2.rs)
-            Err("Need to implemet p2wsh2 atomic swap refund function".into())
-            // Future implementation: p2wsh2::generate_p2wsh_address(swap, network)
+            p2wsh2::refund_p2wsh_htlc(
+                &swap.from_chain,
+                &swap.payment_hash,
+                sender_private_key,
+                utxos,
+                transfer_to_address,
+                3,
+                network
+            )
+            .map_err(|e| Box::new(e) as Box<dyn Error>)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::swap::{Bitcoin, Lightning, Swap};
+
+    // Helper function to create a mock Bitcoin struct
+    fn create_mock_bitcoin() -> Bitcoin {
+        Bitcoin {
+            initiator_pubkey: "0280b2aa1b37d358607896a0747f6104d576fd1b887792e3b2fdc37c7170a8a4d7".to_string(),
+            responder_pubkey: "03d168e6449eae4d673b0020c7e7cbf0b4ba11fddf762450a1cce444b8206d3e0f".to_string(),
+            timelock: 144,
+            amount: 10000,
+            htlc_type: HTLCType::P2wsh2,
+        }
+    }
+
+    // Helper function to create a mock Swap struct
+    fn create_mock_swap() -> Swap {
+        Swap {
+            payment_hash: "c3a704c5669f96c853fd03521e2318f784e1fe743568fdea9fe3eca2850b3368".to_string(),
+            from_chain: create_mock_bitcoin(),
+            to_chain: Lightning {
+                timelock: 144,
+                amount: 10000,
+            },
+        }
+    }
+
+    #[test]
+    fn test_p2wsh_htlc_address() {
+        let swap_struct = create_mock_swap();
+        let address = generate_htlc_address(&swap_struct).expect("Error generating HTLC address");
+        assert_eq!(address.to_string(), "tb1qvcdnft8sszsjrfy0k6dw8t3qkf76au6j7axycgy0qtwdyvtvn2rsumwnly");
+    }
+
+}
+
+
