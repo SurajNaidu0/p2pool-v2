@@ -16,7 +16,7 @@
 
 use bitcoin::{Address, Network, PublicKey, Transaction, TxOut};
 
-const SHARE_VALUE: u64 = 1;
+const SHARE_VALUE: u64 = 100_000_000; // 1 BTC
 
 /// Create a P2PKH coinbase transaction for the given public key and amount
 /// For now, all shares are equal value, so the amount is 1 unit share coin.
@@ -27,7 +27,7 @@ pub fn create_coinbase_transaction(pubkey: &PublicKey, network: Network) -> Tran
     // Create P2PKH script from address
     let script_pubkey = address.script_pubkey();
 
-    // Create TxOut with script_pubkey and amount of 1 satoshi
+    // Create TxOut with script_pubkey and amount of 1 btc
     let tx_out = TxOut {
         value: bitcoin::Amount::from_sat(SHARE_VALUE),
         script_pubkey,
