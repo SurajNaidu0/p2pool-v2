@@ -54,6 +54,16 @@ pub struct BlockMetadata {
     pub is_confirmed: bool,
 }
 
+/// Wrapper for transaction outputs that includes spent status
+/// This is what gets stored in the Outputs column family
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredTxOut {
+    /// The actual transaction output
+    pub txout: bitcoin::TxOut,
+    /// Transaction ID that spent this output (None if unspent)
+    pub spent_by: Option<bitcoin::Txid>,
+}
+
 /// A store for share blocks.
 /// RocksDB as is used as the underlying database.
 /// We use column families to store different types of data, so that compactions are independent for each type.
@@ -456,8 +466,12 @@ impl Store {
             // Store each output for the transaction
             for (i, output) in tx.output.iter().enumerate() {
                 let output_key = format!("{txid}:{i}");
+                let stored_output = StoredTxOut {
+                    txout: output.clone(),
+                    spent_by: None,
+                };
                 let mut serialized = Vec::new();
-                ciborium::ser::into_writer(&output, &mut serialized).unwrap();
+                ciborium::ser::into_writer(&stored_output, &mut serialized).unwrap();
                 batch.put_cf::<&[u8], Vec<u8>>(outputs_cf, output_key.as_ref(), serialized);
             }
         }
@@ -888,14 +902,14 @@ impl Store {
                 .get_cf::<&[u8]>(outputs_cf, output_key.as_ref())
                 .unwrap()
                 .unwrap();
-            let output: bitcoin::TxOut = match ciborium::de::from_reader(output.as_slice()) {
+            let stored_output: StoredTxOut = match ciborium::de::from_reader(output.as_slice()) {
                 Ok(output) => output,
                 Err(e) => {
                     tracing::error!("Error deserializing output: {e:?}");
                     return Err(e.into());
                 }
             };
-            outputs.push(output);
+            outputs.push(stored_output.txout);
         }
         let transaction = Transaction {
             version: tx_metadata.version,
@@ -904,6 +918,76 @@ impl Store {
             output: outputs,
         };
         Ok(transaction)
+    }
+
+    /// Mark an output as spent or unspent
+    /// Updates the spent_by field in the stored output
+    pub fn mark_output_spent(
+        &self,
+        outpoint: &bitcoin::OutPoint,
+        spent_by: Option<bitcoin::Txid>,
+    ) -> Result<(), Box<dyn Error>> {
+        let outputs_cf = self.db.cf_handle(&ColumnFamily::Outputs).unwrap();
+        let output_key = format!("{}:{}", outpoint.txid, outpoint.vout);
+        
+        // Get the existing output
+        let serialized = self
+            .db
+            .get_cf::<&[u8]>(outputs_cf, output_key.as_ref())
+            .map_err(|e| format!("Database error: {e}"))?
+            .ok_or_else(|| format!("Output not found for {output_key}"))?;
+        
+        // Deserialize the stored output
+        let mut stored_output: StoredTxOut = ciborium::de::from_reader(serialized.as_slice())
+            .map_err(|e| format!("Deserialization error: {e}"))?;
+        
+        // Update the spent status
+        stored_output.spent_by = spent_by;
+        
+        // Serialize and store back
+        let mut new_serialized = Vec::new();
+        ciborium::ser::into_writer(&stored_output, &mut new_serialized)
+            .map_err(|e| format!("Serialization error: {e}"))?;
+        
+        self.db
+            .put_cf::<&[u8], Vec<u8>>(outputs_cf, output_key.as_ref(), new_serialized)
+            .map_err(|e| format!("Database write error: {e}"))?;
+        
+        Ok(())
+    }
+
+    /// Check if an output is spent
+    pub fn is_output_spent(&self, outpoint: &bitcoin::OutPoint) -> Result<bool, Box<dyn Error>> {
+        let outputs_cf = self.db.cf_handle(&ColumnFamily::Outputs).unwrap();
+        let output_key = format!("{}:{}", outpoint.txid, outpoint.vout);
+        
+        let serialized = self
+            .db
+            .get_cf::<&[u8]>(outputs_cf, output_key.as_ref())
+            .map_err(|e| format!("Database error: {e}"))?
+            .ok_or_else(|| format!("Output not found for {output_key}"))?;
+        
+        let stored_output: StoredTxOut = ciborium::de::from_reader(serialized.as_slice())
+            .map_err(|e| format!("Deserialization error: {e}"))?;
+        
+        Ok(stored_output.spent_by.is_some())
+    }
+
+    /// Get a transaction output with its spent status
+    pub fn get_spent_by_txout(&self, outpoint: &bitcoin::OutPoint) -> Result<StoredTxOut, Box<dyn Error>> {
+        let outputs_cf = self.db.cf_handle(&ColumnFamily::Outputs).unwrap();
+        let output_key = format!("{}:{}", outpoint.txid, outpoint.vout);
+        
+        let serialized = self
+            .db
+            .get_cf::<&[u8]>(outputs_cf, output_key.as_ref())
+            .map_err(|e| format!("Database error: {e}"))?
+            .ok_or_else(|| format!("Output not found for {output_key}"))?;
+        
+        let stored_output: StoredTxOut = ciborium::de::from_reader(serialized.as_slice())
+            .map_err(|e| format!("Deserialization error: {e}"))?;
+        
+        Ok(stored_output)
     }
 
     /// Get the parent of a share as a ShareBlock
@@ -1690,6 +1774,69 @@ mod tests {
         assert_eq!(tx.output.len(), 1);
         assert_eq!(tx.output[0].value, bitcoin::Amount::from_sat(1000000));
         assert_eq!(tx.output[0].script_pubkey, script_true);
+    }
+
+    #[test]
+    fn test_output_spent_status() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Store::new(temp_dir.path().to_str().unwrap().to_string(), false).unwrap();
+
+        let script_true = bitcoin::Script::builder()
+            .push_opcode(bitcoin::opcodes::all::OP_PUSHNUM_1)
+            .into_script();
+        let tx = Transaction {
+            version: bitcoin::transaction::Version(1),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1000000),
+                script_pubkey: script_true.clone(),
+            }],
+        };
+
+        let txid = tx.compute_txid();
+        let mut batch = rocksdb::WriteBatch::default();
+        store.add_txs(&[tx.clone()], &mut batch);
+        store.db.write(batch).unwrap();
+
+        let outpoint = bitcoin::OutPoint::new(txid, 0);
+
+        // Check initial spent status (should be unspent)
+        let is_spent = store.is_output_spent(&outpoint).unwrap();
+        assert!(!is_spent);
+
+        // Get the output with spent status
+        let stored_output = store.get_spent_by_txout(&outpoint).unwrap();
+        assert!(stored_output.spent_by.is_none());
+        assert_eq!(stored_output.txout.value, bitcoin::Amount::from_sat(1000000));
+        assert_eq!(stored_output.txout.script_pubkey, script_true);
+
+        // Create a spending transaction
+        let spending_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(1),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        let spending_txid = spending_tx.compute_txid();
+
+        // Mark output as spent by the spending transaction
+        store.mark_output_spent(&outpoint, Some(spending_txid)).unwrap();
+
+        // Verify it's now marked as spent
+        let is_spent = store.is_output_spent(&outpoint).unwrap();
+        assert!(is_spent);
+
+        // Get the output again and verify spent status
+        let stored_output = store.get_spent_by_txout(&outpoint).unwrap();
+        assert_eq!(stored_output.spent_by, Some(spending_txid));
+
+        // Mark output as unspent
+        store.mark_output_spent(&outpoint, None).unwrap();
+
+        // Verify it's now marked as unspent
+        let is_spent = store.is_output_spent(&outpoint).unwrap();
+        assert!(!is_spent);
     }
 
     #[test]
