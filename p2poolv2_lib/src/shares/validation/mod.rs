@@ -15,6 +15,7 @@
 // P2Poolv2. If not, see <https://www.gnu.org/licenses/>.
 
 mod bitcoin_block_validation;
+mod transaction;
 
 #[cfg(test)]
 #[mockall_double::double]
